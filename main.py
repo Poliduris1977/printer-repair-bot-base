@@ -360,7 +360,7 @@ def main():
     app.cleanup_ctx.append(graceful_shutdown_ctx)
 
     # Health-check
-       async def health(request):
+    async def health(request):
         return web.Response(text='OK', status=200)
     app.router.add_get('/health', health)
 
@@ -376,3 +376,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

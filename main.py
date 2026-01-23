@@ -7,14 +7,15 @@ import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, 
-    ReplyKeyboardRemove, InputMediaPhoto, InputMediaVideo
+    ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton,
+    InputMediaPhoto, InputMediaVideo
 )
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -31,7 +32,6 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SHEET_ID = os.getenv('SHEET_ID')
 GOOGLE_CRED_RAW = os.getenv('GOOGLE_CREDENTIALS_JSON')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-# Убеждаемся, что ID админа — это чистая строка без пробелов
 ADMIN_ID = os.getenv('ADMIN_ID', '').strip()
 WEBHOOK_PATH = f'/webhook/{BOT_TOKEN.split(":")[0]}'
 
@@ -47,11 +47,13 @@ class SurveyStates(StatesGroup):
     issue_description = State()
     waiting_for_media = State()
     desired_date = State()
+    confirm_data = State()
 
 # --- Вспомогательные функции ---
 
 def get_creds():
     try:
+        # Пытаемся декодировать, если это Base64 (для Render)
         decoded = base64.b64decode(GOOGLE_CRED_RAW).decode('utf-8')
         return json.loads(decoded)
     except Exception:
@@ -90,71 +92,69 @@ def sync_save_to_sheets(data: dict):
 # --- Клавиатуры ---
 
 def get_cancel_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Отменить")]], resize_keyboard=True)
-
-def get_phone_kb():
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📱 Отправить номер", contact=True)
-    builder.button(text="❌ Отменить")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
 
 def get_skip_kb():
     builder = ReplyKeyboardBuilder()
     builder.button(text="Пропустить фото ➡️")
-    builder.button(text="❌ Отменить")
+    builder.button(text="Отмена")
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
 # --- Хендлеры ---
 
 @dp.message(Command("start"))
-@dp.message(F.text == "❌ Отменить")
+@dp.message(F.text == "Отмена")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 **Здравствуйте!**\n\n1. Введите **Название компании** или ваше Имя:", 
-                         parse_mode="Markdown", reply_markup=get_cancel_kb())
+    await message.answer(
+        "👋 **Здравствуйте!**\n\nЯ бот для подачи заявки на ремонт оборудования.\n"
+        "1/6 • Введите **Название компании** или ваше имя:",
+        parse_mode="Markdown", reply_markup=get_cancel_kb()
+    )
     await state.set_state(SurveyStates.company_name)
 
 @dp.message(SurveyStates.company_name)
 async def process_name(message: Message, state: FSMContext):
-    await state.update_data(company_name=message.text)
-    await message.answer("2. Укажите **Адрес** объекта:", parse_mode="Markdown")
+    await state.update_data(company_name=message.text, username=message.from_user.username or "нет")
+    await message.answer("2/6 • Укажите **Адрес** объекта:", parse_mode="Markdown")
     await state.set_state(SurveyStates.address)
 
 @dp.message(SurveyStates.address)
 async def process_address(message: Message, state: FSMContext):
     await state.update_data(address=message.text)
-    await message.answer("3. Ваш контактный **Телефон**:", parse_mode="Markdown", reply_markup=get_phone_kb())
+    await message.answer("3/6 • Ваш контактный **Телефон**:", parse_mode="Markdown")
     await state.set_state(SurveyStates.phone)
 
 @dp.message(SurveyStates.phone)
 async def process_phone(message: Message, state: FSMContext):
-    raw_phone = message.contact.phone_number if message.contact else message.text
-    phone = format_phone(raw_phone)
+    phone = format_phone(message.text)
     if not phone:
-        await message.answer("⚠️ Неверный формат. Нужно 11 цифр (например, +79001112233):")
+        await message.answer("❌ Неверный формат. Нужно 11 цифр (например, 89991234567):")
         return
     await state.update_data(phone=phone)
-    await message.answer("4. Модель оборудования:", reply_markup=get_cancel_kb())
+    await message.answer("4/6 • Модель **оборудования** (принтера):", parse_mode="Markdown")
     await state.set_state(SurveyStates.printer_model)
 
 @dp.message(SurveyStates.printer_model)
 async def process_model(message: Message, state: FSMContext):
     await state.update_data(printer_model=message.text)
-    await message.answer("5. Опишите проблему:")
+    await message.answer("5/6 • Кратко опишите **суть проблемы**:", parse_mode="Markdown")
     await state.set_state(SurveyStates.issue_description)
 
 @dp.message(SurveyStates.issue_description)
 async def process_issue(message: Message, state: FSMContext):
     await state.update_data(issue_description=message.text, media=[])
-    await message.answer("📸 Пришлите фото/видео или нажмите **Пропустить**:", 
-                         reply_markup=get_skip_kb())
+    await message.answer(
+        "📸 **Пришлите фото или видео проблемы**\n\n"
+        "Можно несколько. Если фото нет — нажмите кнопку ниже:",
+        parse_mode="Markdown", reply_markup=get_skip_kb()
+    )
     await state.set_state(SurveyStates.waiting_for_media)
 
 @dp.message(SurveyStates.waiting_for_media, F.text == "Пропустить фото ➡️")
 async def skip_media(message: Message, state: FSMContext):
-    await message.answer("✅ Без фото.\n6. Укажите желаемую **дату и время** визита:", reply_markup=get_cancel_kb())
+    await message.answer("6/6 • Желаемая **дата и время** визита:", parse_mode="Markdown", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.waiting_for_media, F.photo | F.video)
@@ -171,81 +171,98 @@ async def handle_media(message: Message, state: FSMContext):
     await state.update_data(timer=new_timer)
 
 async def wait_for_next_media(message: Message, state: FSMContext):
-    await asyncio.sleep(5)
-    await message.answer("✅ Файлы получены.\n6. Укажите желаемую **дату и время** визита:", reply_markup=get_cancel_kb())
+    await asyncio.sleep(4) # Ждем 4 секунды после последнего фото
+    await message.answer("✅ Файлы приняты.\n6/6 • Желаемая **дата и время** визита:", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.desired_date)
 async def process_date(message: Message, state: FSMContext):
     await state.update_data(desired_date=message.text)
     data = await state.get_data()
-    data['username'] = message.from_user.username or "нет"
+    
+    confirm_text = (
+        "📋 **Проверьте данные:**\n\n"
+        f"🏢 Компания: {data['company_name']}\n"
+        f"📍 Адрес: {data['address']}\n"
+        f"📞 Тел: {data['phone']}\n"
+        f"🖨 Модель: {data['printer_model']}\n"
+        f"📝 Проблема: {data['issue_description']}\n"
+        f"🕒 Дата: {message.text}\n"
+        f"🖼 Файлов: {len(data.get('media', []))}\n\n"
+        "Всё верно?"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да, отправить ✅", callback_data="confirm_send")],
+        [InlineKeyboardButton(text="Заполнить заново ✏️", callback_data="restart")]
+    ])
+    await message.answer(confirm_text, reply_markup=kb, parse_mode="Markdown")
 
-    # Отправляем техническое сообщение (не сохраняем в переменную для редактирования, а удалим потом)
-    status_msg = await message.answer("⏳ Сохраняю заявку...", reply_markup=ReplyKeyboardRemove())
+@dp.callback_query(F.data == "restart")
+async def restart_call(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    await cmd_start(callback.message, state)
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_send")
+async def confirm_send(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
     
-    # Сохранение в таблицу через поток
+    # Индикация загрузки
+    status_msg = await callback.message.answer("⏳ Сохранение заявки...")
+    await callback.message.delete()
+
     loop = asyncio.get_event_loop()
-    try:
-        success = await loop.run_in_executor(thread_executor, sync_save_to_sheets, data)
-    except Exception as e:
-        logger.error(f"Глобальная ошибка сохранения: {e}")
-        success = False
+    success = await loop.run_in_executor(thread_executor, sync_save_to_sheets, data)
     
-    # Попытка удалить статусное сообщение, чтобы избежать ошибок редактирования
-    try:
-        await status_msg.delete()
-    except:
-        pass
+    try: await status_msg.delete()
+    except: pass
 
     if success:
-        # Отправляем финальное подтверждение новым сообщением
-        await message.answer("🎉 **Заявка успешно принята!**\nМы скоро свяжемся с вами.", parse_mode="Markdown")
+        await callback.message.answer("🎉 **Заявка принята!**\nМы скоро свяжемся с вами.", parse_mode="Markdown")
         
         # УВЕДОМЛЕНИЕ АДМИНУ
         if ADMIN_ID:
             try:
-                admin_id_val = str(ADMIN_ID).strip()
-                summary = (
-                    f"🔔 **Новая заявка!**\n"
-                    f"👤: @{data['username']}\n"
-                    f"📞: {data['phone']}\n"
-                    f"🏢: {data['company_name']}\n"
-                    f"🛠: {data['printer_model']}\n"
-                    f"📝: {data['issue_description']}\n"
-                    f"📅: {data['desired_date']}"
-                )[:1000] # Ограничение Telegram для подписей к медиа
+                user_url = f"https://t.me/{data['username']}" if data['username'] != "нет" else "нет"
+                admin_text = (
+                    f"🔔 **НОВАЯ ЗАЯВКА**\n"
+                    f"━━━━━━━━━━━━━\n"
+                    f"🏢 **Компания:** {data['company_name']}\n"
+                    f"📍 **Адрес:** {data['address']}\n"
+                    f"📞 **Телефон:** {data['phone']}\n"
+                    f"🛠 **Модель:** {data['printer_model']}\n"
+                    f"🕒 **Дата:** {data['desired_date']}\n"
+                    f"📝 **Суть:** {data['issue_description']}\n\n"
+                    f"👤 **Клиент:** @{data['username']} [Написать]({user_url})"
+                )[:1000]
 
-                media_files = data.get('media', [])
-                if not media_files:
-                    await bot.send_message(chat_id=admin_id_val, text=summary, parse_mode="Markdown")
+                media_list = data.get('media', [])
+                if not media_list:
+                    await bot.send_message(ADMIN_ID, admin_text, parse_mode="Markdown", disable_web_page_preview=True)
                 else:
                     album = []
-                    for i, item in enumerate(media_files[:10]):
+                    for i, item in enumerate(media_list[:10]):
                         f_type, f_id = item.split(": ", 1)
-                        cap = summary if i == 0 else None
+                        caption = admin_text if i == 0 else None
                         if "Photo" in f_type:
-                            album.append(InputMediaPhoto(media=f_id, caption=cap, parse_mode="Markdown"))
+                            album.append(InputMediaPhoto(media=f_id, caption=caption, parse_mode="Markdown"))
                         else:
-                            album.append(InputMediaVideo(media=f_id, caption=cap, parse_mode="Markdown"))
-                    
-                    if album:
-                        await bot.send_media_group(chat_id=admin_id_val, media=album)
-            except Exception as admin_err:
-                logger.error(f"Ошибка уведомления админа: {admin_err}")
+                            album.append(InputMediaVideo(media=f_id, caption=caption, parse_mode="Markdown"))
+                    await bot.send_media_group(ADMIN_ID, media=album)
+            except Exception as e:
+                logger.error(f"Admin Notify Error: {e}")
     else:
-        await message.answer("❌ Ошибка при записи в таблицу. Мы свяжемся с вами напрямую.")
+        await callback.message.answer("❌ Ошибка сохранения. Мы свяжемся с вами напрямую.")
     
     await state.clear()
+    await callback.answer()
 
-# --- Webhook & Lifecycle ---
+# --- Webhook & LifeCycle ---
 
 async def on_lifecycle(app: web.Application):
-    if not WEBHOOK_URL:
-        logger.critical("WEBHOOK_URL не задана!")
     full_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
     await bot.set_webhook(full_url, drop_pending_updates=True)
-    logger.info(f"Вебхук установлен: {full_url}")
     yield
     await bot.session.close()
     thread_executor.shutdown(wait=True)

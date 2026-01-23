@@ -31,7 +31,8 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SHEET_ID = os.getenv('SHEET_ID')
 GOOGLE_CRED_RAW = os.getenv('GOOGLE_CREDENTIALS_JSON')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-ADMIN_ID = os.getenv('ADMIN_ID') 
+# Очищаем ID админа от лишних пробелов сразу при загрузке
+ADMIN_ID = os.getenv('ADMIN_ID', '').strip()
 WEBHOOK_PATH = f'/webhook/{BOT_TOKEN.split(":")[0]}'
 
 bot = Bot(token=BOT_TOKEN)
@@ -57,13 +58,10 @@ def get_creds():
         return json.loads(GOOGLE_CRED_RAW)
 
 def format_phone(phone: str) -> str:
-    digits = re.sub(r'\D', '', phone)
-    if digits.startswith('8'):
-        digits = '7' + digits[1:]
-    elif not digits.startswith('7'):
-        digits = '7' + digits
-    if len(digits) == 11:
-        return f"+{digits}"
+    digits = re.sub(r'\D', '', str(phone))
+    if digits.startswith('8'): digits = '7' + digits[1:]
+    elif not digits.startswith('7'): digits = '7' + digits
+    if len(digits) == 11: return f"+{digits}"
     return None
 
 def sync_save_to_sheets(data: dict):
@@ -92,14 +90,18 @@ def sync_save_to_sheets(data: dict):
 # --- Клавиатуры ---
 
 def get_cancel_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отменить")]],
-        resize_keyboard=True
-    )
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Отменить")]], resize_keyboard=True)
 
 def get_phone_kb():
     builder = ReplyKeyboardBuilder()
-    builder.button(text="📱 Отправить мой номер", contact=True)
+    builder.button(text="📱 Отправить номер", contact=True)
+    builder.button(text="❌ Отменить")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+def get_skip_kb():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="Пропустить фото ➡️")
     builder.button(text="❌ Отменить")
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
@@ -110,65 +112,57 @@ def get_phone_kb():
 @dp.message(F.text == "❌ Отменить")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "👋 **Здравствуйте!**\n\nЯ помогу оформить заявку на ремонт.\n"
-        "1. Введите **Название компании** или ваше Имя:",
-        parse_mode="Markdown",
-        reply_markup=get_cancel_kb()
-    )
+    await message.answer("👋 **Начинаем оформление.**\n\n1. Название компании или ваше Имя:", 
+                         parse_mode="Markdown", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.company_name)
 
 @dp.message(SurveyStates.company_name)
 async def process_name(message: Message, state: FSMContext):
     await state.update_data(company_name=message.text)
-    await message.answer("2. Укажите **Адрес** объекта:", parse_mode="Markdown")
+    await message.answer("2. Укажите **Адрес**:", parse_mode="Markdown")
     await state.set_state(SurveyStates.address)
 
 @dp.message(SurveyStates.address)
 async def process_address(message: Message, state: FSMContext):
     await state.update_data(address=message.text)
-    await message.answer(
-        "3. Ваш **Номер телефона**:\n\nНажмите кнопку или введите вручную:",
-        parse_mode="Markdown",
-        reply_markup=get_phone_kb()
-    )
+    await message.answer("3. Контактный **Телефон**:", parse_mode="Markdown", reply_markup=get_phone_kb())
     await state.set_state(SurveyStates.phone)
 
 @dp.message(SurveyStates.phone)
 async def process_phone(message: Message, state: FSMContext):
     raw_phone = message.contact.phone_number if message.contact else message.text
-    formatted_phone = format_phone(raw_phone)
-    if not formatted_phone:
-        await message.answer("⚠️ Неверный формат! Введите номер (напр. +79001234567):")
+    phone = format_phone(raw_phone)
+    if not phone:
+        await message.answer("⚠️ Неверный формат. Нужно 11 цифр (напр. +79001112233):")
         return
-    await state.update_data(phone=formatted_phone)
-    await message.answer("4. Модель **оборудования**:", parse_mode="Markdown", reply_markup=get_cancel_kb())
+    await state.update_data(phone=phone)
+    await message.answer("4. Модель оборудования:", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.printer_model)
 
 @dp.message(SurveyStates.printer_model)
 async def process_model(message: Message, state: FSMContext):
     await state.update_data(printer_model=message.text)
-    await message.answer("5. Кратко опишите **суть проблемы**:", parse_mode="Markdown")
+    await message.answer("5. Опишите проблему:")
     await state.set_state(SurveyStates.issue_description)
 
 @dp.message(SurveyStates.issue_description)
 async def process_issue(message: Message, state: FSMContext):
     await state.update_data(issue_description=message.text, media=[])
-    await message.answer(
-        "📸 **Пришлите фото или видео проблемы**\n\n"
-        "Можно несколько. Через 5 сек после последнего файла перейдем дальше.",
-        parse_mode="Markdown"
-    )
+    await message.answer("📸 Пришлите фото/видео или нажмите **Пропустить**:", 
+                         reply_markup=get_skip_kb())
     await state.set_state(SurveyStates.waiting_for_media)
+
+@dp.message(SurveyStates.waiting_for_media, F.text == "Пропустить фото ➡️")
+async def skip_media(message: Message, state: FSMContext):
+    await message.answer("✅ Без фото. \n6. Укажите дату и время визита:", reply_markup=get_cancel_kb())
+    await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.waiting_for_media, F.photo | F.video)
 async def handle_media(message: Message, state: FSMContext):
     data = await state.get_data()
     media = data.get('media', [])
-    if message.photo:
-        media.append(f"Photo: {message.photo[-1].file_id}")
-    elif message.video:
-        media.append(f"Video: {message.video.file_id}")
+    if message.photo: media.append(f"Photo: {message.photo[-1].file_id}")
+    elif message.video: media.append(f"Video: {message.video.file_id}")
     await state.update_data(media=media)
     
     current_timer = data.get('timer')
@@ -178,7 +172,7 @@ async def handle_media(message: Message, state: FSMContext):
 
 async def wait_for_next_media(message: Message, state: FSMContext):
     await asyncio.sleep(5)
-    await message.answer("✅ Медиа приняты. \n6. Укажите желаемую **дату и время** визита:")
+    await message.answer("✅ Файлы получены. \n6. Желаемая дата и время визита:", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.desired_date)
@@ -188,20 +182,25 @@ async def process_date(message: Message, state: FSMContext):
     data['username'] = message.from_user.username or "нет"
 
     status_msg = await message.answer("⏳ Сохраняю заявку...", reply_markup=ReplyKeyboardRemove())
+    
     loop = asyncio.get_event_loop()
     success = await loop.run_in_executor(thread_executor, sync_save_to_sheets, data)
     
     if success:
-        await status_msg.edit_text("🎉 **Заявка принята!**", parse_mode="Markdown")
+        # СНАЧАЛА ОТВЕЧАЕМ КЛИЕНТУ
+        await status_msg.edit_text("🎉 **Заявка принята!**\nМы скоро свяжемся с вами.", parse_mode="Markdown")
+        
+        # ПОТОМ УВЕДОМЛЕНИЕ АДМИНУ
         if ADMIN_ID:
             try:
                 summary = (
                     f"🔔 **Новая заявка!**\n👤: @{data['username']}\n📞: {data['phone']}\n"
-                    f"🏢: {data['company_name']}\n🛠: {data['printer_model']}\n📝: {data['issue_description']}"
-                )
+                    f"🏢: {data['company_name']}\n🛠: {data['printer_model']}\n📝: {data['issue_description']}\n📅: {data['desired_date']}"
+                )[:1000] # Защита от переполнения (лимит 1024)
+
                 media_files = data.get('media', [])
                 if not media_files:
-                    await bot.send_message(ADMIN_ID, summary, parse_mode="Markdown")
+                    await bot.send_message(chat_id=ADMIN_ID, text=summary, parse_mode="Markdown")
                 else:
                     album = []
                     for i, item in enumerate(media_files[:10]):
@@ -211,17 +210,18 @@ async def process_date(message: Message, state: FSMContext):
                             album.append(InputMediaPhoto(media=f_id, caption=cap, parse_mode="Markdown"))
                         else:
                             album.append(InputMediaVideo(media=f_id, caption=cap, parse_mode="Markdown"))
-                    await bot.send_media_group(ADMIN_ID, media=album)
-            except Exception as e: logger.error(f"Admin Notify Error: {e}")
+                    await bot.send_media_group(chat_id=ADMIN_ID, media=album)
+            except Exception as e:
+                logger.error(f"Ошибка уведомления админа: {e}")
     else:
-        await status_msg.edit_text("❌ Ошибка записи.")
+        await status_msg.edit_text("❌ Ошибка при записи в таблицу. Мы свяжемся с вами вручную.")
+    
     await state.clear()
 
 # --- Webhook ---
 
 async def on_lifecycle(app: web.Application):
-    base_url = WEBHOOK_URL.rstrip('/')
-    full_url = f"{base_url}{WEBHOOK_PATH}"
+    full_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
     await bot.set_webhook(full_url, drop_pending_updates=True)
     yield
     await bot.session.close()

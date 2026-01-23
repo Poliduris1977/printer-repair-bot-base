@@ -31,7 +31,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 SHEET_ID = os.getenv('SHEET_ID')
 GOOGLE_CRED_RAW = os.getenv('GOOGLE_CREDENTIALS_JSON')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-# Очищаем ID админа от лишних пробелов сразу при загрузке
+# Убеждаемся, что ID админа — это чистая строка без пробелов
 ADMIN_ID = os.getenv('ADMIN_ID', '').strip()
 WEBHOOK_PATH = f'/webhook/{BOT_TOKEN.split(":")[0]}'
 
@@ -112,20 +112,20 @@ def get_skip_kb():
 @dp.message(F.text == "❌ Отменить")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 **Начинаем оформление.**\n\n1. Название компании или ваше Имя:", 
+    await message.answer("👋 **Здравствуйте!**\n\n1. Введите **Название компании** или ваше Имя:", 
                          parse_mode="Markdown", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.company_name)
 
 @dp.message(SurveyStates.company_name)
 async def process_name(message: Message, state: FSMContext):
     await state.update_data(company_name=message.text)
-    await message.answer("2. Укажите **Адрес**:", parse_mode="Markdown")
+    await message.answer("2. Укажите **Адрес** объекта:", parse_mode="Markdown")
     await state.set_state(SurveyStates.address)
 
 @dp.message(SurveyStates.address)
 async def process_address(message: Message, state: FSMContext):
     await state.update_data(address=message.text)
-    await message.answer("3. Контактный **Телефон**:", parse_mode="Markdown", reply_markup=get_phone_kb())
+    await message.answer("3. Ваш контактный **Телефон**:", parse_mode="Markdown", reply_markup=get_phone_kb())
     await state.set_state(SurveyStates.phone)
 
 @dp.message(SurveyStates.phone)
@@ -133,7 +133,7 @@ async def process_phone(message: Message, state: FSMContext):
     raw_phone = message.contact.phone_number if message.contact else message.text
     phone = format_phone(raw_phone)
     if not phone:
-        await message.answer("⚠️ Неверный формат. Нужно 11 цифр (напр. +79001112233):")
+        await message.answer("⚠️ Неверный формат. Нужно 11 цифр (например, +79001112233):")
         return
     await state.update_data(phone=phone)
     await message.answer("4. Модель оборудования:", reply_markup=get_cancel_kb())
@@ -154,7 +154,7 @@ async def process_issue(message: Message, state: FSMContext):
 
 @dp.message(SurveyStates.waiting_for_media, F.text == "Пропустить фото ➡️")
 async def skip_media(message: Message, state: FSMContext):
-    await message.answer("✅ Без фото. \n6. Укажите дату и время визита:", reply_markup=get_cancel_kb())
+    await message.answer("✅ Без фото.\n6. Укажите желаемую **дату и время** визита:", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.waiting_for_media, F.photo | F.video)
@@ -172,7 +172,7 @@ async def handle_media(message: Message, state: FSMContext):
 
 async def wait_for_next_media(message: Message, state: FSMContext):
     await asyncio.sleep(5)
-    await message.answer("✅ Файлы получены. \n6. Желаемая дата и время визита:", reply_markup=get_cancel_kb())
+    await message.answer("✅ Файлы получены.\n6. Укажите желаемую **дату и время** визита:", reply_markup=get_cancel_kb())
     await state.set_state(SurveyStates.desired_date)
 
 @dp.message(SurveyStates.desired_date)
@@ -181,26 +181,44 @@ async def process_date(message: Message, state: FSMContext):
     data = await state.get_data()
     data['username'] = message.from_user.username or "нет"
 
+    # Отправляем техническое сообщение (не сохраняем в переменную для редактирования, а удалим потом)
     status_msg = await message.answer("⏳ Сохраняю заявку...", reply_markup=ReplyKeyboardRemove())
     
+    # Сохранение в таблицу через поток
     loop = asyncio.get_event_loop()
-    success = await loop.run_in_executor(thread_executor, sync_save_to_sheets, data)
+    try:
+        success = await loop.run_in_executor(thread_executor, sync_save_to_sheets, data)
+    except Exception as e:
+        logger.error(f"Глобальная ошибка сохранения: {e}")
+        success = False
     
+    # Попытка удалить статусное сообщение, чтобы избежать ошибок редактирования
+    try:
+        await status_msg.delete()
+    except:
+        pass
+
     if success:
-        # СНАЧАЛА ОТВЕЧАЕМ КЛИЕНТУ
-        await status_msg.edit_text("🎉 **Заявка принята!**\nМы скоро свяжемся с вами.", parse_mode="Markdown")
+        # Отправляем финальное подтверждение новым сообщением
+        await message.answer("🎉 **Заявка успешно принята!**\nМы скоро свяжемся с вами.", parse_mode="Markdown")
         
-        # ПОТОМ УВЕДОМЛЕНИЕ АДМИНУ
+        # УВЕДОМЛЕНИЕ АДМИНУ
         if ADMIN_ID:
             try:
+                admin_id_val = str(ADMIN_ID).strip()
                 summary = (
-                    f"🔔 **Новая заявка!**\n👤: @{data['username']}\n📞: {data['phone']}\n"
-                    f"🏢: {data['company_name']}\n🛠: {data['printer_model']}\n📝: {data['issue_description']}\n📅: {data['desired_date']}"
-                )[:1000] # Защита от переполнения (лимит 1024)
+                    f"🔔 **Новая заявка!**\n"
+                    f"👤: @{data['username']}\n"
+                    f"📞: {data['phone']}\n"
+                    f"🏢: {data['company_name']}\n"
+                    f"🛠: {data['printer_model']}\n"
+                    f"📝: {data['issue_description']}\n"
+                    f"📅: {data['desired_date']}"
+                )[:1000] # Ограничение Telegram для подписей к медиа
 
                 media_files = data.get('media', [])
                 if not media_files:
-                    await bot.send_message(chat_id=ADMIN_ID, text=summary, parse_mode="Markdown")
+                    await bot.send_message(chat_id=admin_id_val, text=summary, parse_mode="Markdown")
                 else:
                     album = []
                     for i, item in enumerate(media_files[:10]):
@@ -210,19 +228,24 @@ async def process_date(message: Message, state: FSMContext):
                             album.append(InputMediaPhoto(media=f_id, caption=cap, parse_mode="Markdown"))
                         else:
                             album.append(InputMediaVideo(media=f_id, caption=cap, parse_mode="Markdown"))
-                    await bot.send_media_group(chat_id=ADMIN_ID, media=album)
-            except Exception as e:
-                logger.error(f"Ошибка уведомления админа: {e}")
+                    
+                    if album:
+                        await bot.send_media_group(chat_id=admin_id_val, media=album)
+            except Exception as admin_err:
+                logger.error(f"Ошибка уведомления админа: {admin_err}")
     else:
-        await status_msg.edit_text("❌ Ошибка при записи в таблицу. Мы свяжемся с вами вручную.")
+        await message.answer("❌ Ошибка при записи в таблицу. Мы свяжемся с вами напрямую.")
     
     await state.clear()
 
-# --- Webhook ---
+# --- Webhook & Lifecycle ---
 
 async def on_lifecycle(app: web.Application):
+    if not WEBHOOK_URL:
+        logger.critical("WEBHOOK_URL не задана!")
     full_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
     await bot.set_webhook(full_url, drop_pending_updates=True)
+    logger.info(f"Вебхук установлен: {full_url}")
     yield
     await bot.session.close()
     thread_executor.shutdown(wait=True)
